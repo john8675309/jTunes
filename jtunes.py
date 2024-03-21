@@ -8,11 +8,15 @@ from appdirs import user_config_dir
 import mutagen
 from mutagen.easyid3 import EasyID3
 from mutagen.mp3 import MP3
+from mutagen.id3 import ID3, APIC
 import threading
 import base64
 from io import BytesIO
 import pygame
 import time
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+from threading import Timer
 
 def get_icon_base64():
     # Return the Base64 encoded string of your icon
@@ -34,6 +38,13 @@ class MainWindow(Gtk.Window):
         self.keep_running = False
         self.is_playing = False
         self.current_song_pos_ms = 0
+        self.treeview = Gtk.TreeView()
+        self.current_filter_text = ""
+        window_width = 800  # Your window's initial width
+        num_columns = 5  # The number of columns
+        padding = 20  # Adjust as needed
+        initial_column_width = (window_width - (padding * num_columns)) / num_columns
+        self.liststore = Gtk.ListStore(int, str, str, str, str, str)
         icon_base64 = get_icon_base64()
         icon_bytes = base64.b64decode(icon_base64)
         # Load the bytes into a GdkPixbuf.Pixbuf
@@ -41,6 +52,7 @@ class MainWindow(Gtk.Window):
         loader.write(icon_bytes)
         loader.close()
         icon_pixbuf = loader.get_pixbuf()
+        self.icon_pixbuf = icon_pixbuf
         self.set_icon(icon_pixbuf)
         # Create a vertical box to hold the menu bar, top controls, and the main area
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -175,6 +187,9 @@ class MainWindow(Gtk.Window):
         search_entry = Gtk.Entry()
         search_entry.set_width_chars(20)  # Set the width of the search entry
         search_entry_box.pack_start(search_entry, False, False, 0)
+        self.search_entry = search_entry  # Assuming you've created this already
+        self.search_entry.connect("changed", self.on_search_entry_changed)
+
 
         # Add magnifying glass icon
         magnifying_glass_icon = Gtk.Image.new_from_icon_name("edit-find", Gtk.IconSize.BUTTON)
@@ -203,12 +218,14 @@ class MainWindow(Gtk.Window):
         # Create a ListStore for the side column data
         side_liststore = Gtk.ListStore(str)
         side_liststore.append(["Library"])
-        side_liststore.append(["Radio"])
-        side_liststore.append(["Twentieth Century Blues"])
+        #side_liststore.append(["Radio"])
+        #side_liststore.append(["Twentieth Century Blues"])
         # Add more items as needed
-
         side_treeview.set_model(side_liststore)
-
+        self.side_treeview = side_treeview
+        selection = self.side_treeview.get_selection()
+        selection.connect("changed", self.on_side_selection_changed)
+        self.select_default_side_item()
         # Create a scrollable container for the side column
         side_scrolled_window = Gtk.ScrolledWindow()
         side_scrolled_window.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -228,6 +245,25 @@ class MainWindow(Gtk.Window):
         column_artist = Gtk.TreeViewColumn("Artist", renderer_text, text=3)
         column_album = Gtk.TreeViewColumn("Album", renderer_text, text=4)
         column_genre = Gtk.TreeViewColumn("Genre", renderer_text, text=5)
+
+        column_song_name.set_fixed_width(initial_column_width)
+        column_time.set_fixed_width(initial_column_width)
+        column_artist.set_fixed_width(initial_column_width)
+        column_album.set_fixed_width(initial_column_width)
+        column_genre.set_fixed_width(initial_column_width)
+
+
+        column_song_name.set_sort_column_id(1)
+        column_time.set_sort_column_id(2)
+        column_artist.set_sort_column_id(3) 
+        column_album.set_sort_column_id(4)
+        column_genre.set_sort_column_id(5) 
+
+        column_genre.set_resizable(True)
+        column_album.set_resizable(True)
+        column_artist.set_resizable(True)
+        column_time.set_resizable(True)
+        column_song_name.set_resizable(True)
 
         self.treeview.append_column(column_song_name)
         self.treeview.append_column(column_time)
@@ -252,6 +288,9 @@ class MainWindow(Gtk.Window):
         self.add(vbox)
         self.init_database()
         self.add_column_if_not_exists('preferences', 'volume', 'REAL DEFAULT 0.5')
+        self.add_column_if_not_exists('preferences', 'min_to_tray', 'INTEGER DEFAULT 0')
+        self.add_column_if_not_exists('mp3_files', 'play_count', 'INTEGER DEFAULT 0')
+        self.connect("delete-event", self.on_main_window_delete_event)
         pygame.mixer.music.set_volume(self.load_volume_setting())
         volume_slider.set_value(self.load_volume_setting())
         # Attempt to load the previously selected music directory
@@ -261,8 +300,35 @@ class MainWindow(Gtk.Window):
             # If a music directory is found, start scanning it in a new thread
             threading.Thread(target=self.scan_music_directory, args=(music_directory,)).start()
         # Populate the main TreeView with sample data
+        self.create_tray_icon()
+    def on_search_entry_changed(self, entry):
+        """Called whenever the text in the search entry changes."""
+        self.current_filter_text = entry.get_text()  # Update the current filter text
+        self.filter.refilter()  # Refilter the treeview
+
+    def select_default_side_item(self):
+        # Select the first row in the side list (Library)
+        selection = self.side_treeview.get_selection()
+        selection.select_path(Gtk.TreePath(0))
+    def display_library_content(self):
+        if self.treeview is not None:
+            self.populate_treeview()
         
-        self.populate_treeview()
+    def on_side_selection_changed(self, selection):
+        model, treeiter = selection.get_selected()
+        if treeiter:
+            selected_item = model[treeiter][0]  # Get the name of the selected item
+
+            # Respond to the selection
+            if selected_item == "Library":
+                self.init_database()
+                self.display_library_content()
+            elif selected_item == "Radio":
+                # Logic to display Radio content
+                pass
+            elif selected_item == "Twentieth Century Blues":
+                # Logic for Twentieth Century Blues
+                pass
     def update_play_pause_button(self):
         # Update the button icon and tooltip based on play/pause state
         if self.is_playing:
@@ -290,7 +356,6 @@ class MainWindow(Gtk.Window):
         else:
             pygame.mixer.music.unpause()
             self.is_playing = True
-            print("Is Playing!!")
             self.update_play_pause_button()
 
             
@@ -378,6 +443,13 @@ class MainWindow(Gtk.Window):
         music_directory = self.load_music_directory()
         if music_directory:
             file_chooser.set_current_folder(music_directory)
+        min_to_tray_checkbox = Gtk.CheckButton(label="Minimize to Tray")
+        min_to_tray_value = self.load_min_to_tray_setting()  # Assuming you implement this method
+        min_to_tray_checkbox.set_active(min_to_tray_value == 1)
+
+        min_to_tray_checkbox.connect("toggled", self.on_min_to_tray_toggled)
+        content_box.pack_start(min_to_tray_checkbox, False, False, 0)
+
 
         dialog.show_all()
         response = dialog.run()
@@ -391,6 +463,41 @@ class MainWindow(Gtk.Window):
             threading.Thread(target=self.scan_music_directory, args=(selected_directory,)).start()
 
         dialog.destroy()
+    def on_main_window_delete_event(self, widget, event):
+        min_to_tray = self.load_min_to_tray_setting()
+        if min_to_tray == 1:
+            self.hide()
+            #self.hide_on_delete()  # This prevents the window from being destroyed
+            return True  # This stops the event from propagating further
+        return False
+    def on_tray_icon_activate(self, icon):
+        if self.is_visible():
+            self.hide()
+        else:
+            self.show_all()
+    def create_tray_icon(self):
+        self.tray_icon = Gtk.StatusIcon()
+        self.tray_icon.set_from_pixbuf(self.icon_pixbuf)
+        self.tray_icon.connect("activate", self.on_tray_icon_activate)
+        self.tray_icon.set_tooltip_text("jTunes")
+        self.tray_icon.set_visible(True)  
+    def on_min_to_tray_toggled(self, checkbox):
+        new_value = 1 if checkbox.get_active() else 0
+        self.save_min_to_tray_setting(new_value)
+
+    def save_min_to_tray_setting(self, value):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE preferences SET min_to_tray = ?", (value,))
+        conn.commit()
+        conn.close()
+    def load_min_to_tray_setting(self): 
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT min_to_tray FROM preferences LIMIT 1")
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else 0
     def save_music_directory(self, directory):
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
@@ -426,7 +533,10 @@ class MainWindow(Gtk.Window):
         about_dialog.destroy()
 
     def populate_treeview(self):
-        liststore = Gtk.ListStore(int,str, str, str, str, str)
+        #liststore = Gtk.ListStore(int,str, str, str, str, str)
+        # Assuming self.treeview is your Gtk.TreeView and it's associated with a ListStore or similar
+        
+        self.liststore.clear()
 
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
@@ -435,11 +545,39 @@ class MainWindow(Gtk.Window):
         conn.close()
 
         for row in rows:
-            liststore.append(list(row))
+            # Convert the length from seconds to mm:ss format
+            try:
+                length_seconds = float(row[2]) if row[2] else 0
+            except ValueError:
+                length_seconds = 0
+            minutes = int(length_seconds // 60)
+            seconds = int(length_seconds % 60)
+            length_formatted = f"{minutes}:{seconds:02d}"  # Format seconds as two digits
+            # Create a new tuple with the formatted length
+            new_row = (row[0], row[1], length_formatted, row[3], row[4], row[5])
+            self.liststore.append(new_row)
+        #self.liststore = liststore
+        self.filter = self.liststore.filter_new()  # Create a filter for the liststore
+        self.filter.set_visible_func(self.filter_func)  # Set the filter function
+        self.treeview.set_model(self.filter)
+        #self.treeview.set_model(liststore)
 
-        self.treeview.set_model(liststore)
 
+    def filter_func(self, model, iter, data):
+        """Determines if the row should be visible based on the search query."""
+        if self.current_filter_text == "":
+            return True
+        for col_index in [1, 3, 4, 5]:
+            value = model[iter][col_index]  # Get the value from the model at the given column index
+            if value is None:
+                # If the value is None, skip to the next column
+                continue
+            elif self.current_filter_text.lower() in value.lower():
+                # If the current filter text is found in this column, return True
+                return True
 
+        # If the loop completes without finding a match, return False
+        return False
 
     def scan_music_directory(self, directory):
         conn = sqlite3.connect(self.db_path)
@@ -525,8 +663,10 @@ class MainWindow(Gtk.Window):
                     filepath = os.path.join(root, file)
                     if not file_exists_in_db(filepath):
                         audio = EasyID3(filepath)
+                        audio_l = MP3(filepath)
                         song_name = audio.get("title", [None])[0]
-                        length = audio.get("length", [None])[0]
+                        
+                        length = audio_l.info.length
                         artist = audio.get("artist", [None])[0]
                         album = audio.get("album", [None])[0]
                         genre = audio.get("genre", [None])[0]
@@ -598,13 +738,28 @@ class MainWindow(Gtk.Window):
         self.update_play_pause_button()
         self.is_slider_adjusting = False
         
-        
+    def play_next_song(self):
+        # Logic to determine the next song to play
+        selection = self.treeview.get_selection()
+        model, treeiter = selection.get_selected()
+        if treeiter:
+            next_iter = model.iter_next(treeiter)
+            if next_iter is None:
+               # If we're at the end, start from the first song
+               next_iter = model.get_iter_first()
+            selection.select_iter(next_iter)
+            song_id = model.get_value(next_iter, 0)  # Assuming the ID is in the first column
+            self.play_song(song_id)
+        self.is_playing = True
+        self.update_play_pause_button()
+
     def monitor_playback(self):
         self.last_check = pygame.mixer.music.get_pos()
         while self.keep_running:
             if not self.is_slider_adjusting and self.is_playing:
                 now = pygame.mixer.music.get_pos()
                 if now == -1:
+                    GLib.idle_add(self.play_next_song)
                     break
                 if self.last_check != -1:
                     elapsed = now - self.last_check
@@ -618,7 +773,6 @@ class MainWindow(Gtk.Window):
     def play_song_now(self, filepath):
         audio = EasyID3(filepath)
         song_name = audio.get("title", [None])[0]
-        #length = audio.get("length", [None])[0]
         artist = audio.get("artist", [None])[0]
         album = audio.get("album", [None])[0]
         artist_album_text = f"{artist} - {album} - {song_name}" if artist and album else ""
