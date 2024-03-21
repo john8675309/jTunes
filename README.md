@@ -24,8 +24,12 @@ Playing songs one by one works.
 
 # Some flashy photos
 
+![d](https://github.com/john8675309/jTunes/blob/main/playback.png?raw=true)
 
 
 
+![d](https://github.com/john8675309/jTunes/blob/main/about.png?raw=true)
+
+![d](https://github.com/john8675309/jTunes/blob/main/icon.png?raw=true)
 
 
