@@ -79,7 +79,8 @@ class MainWindow(Gtk.Window):
         pygame.mixer.init()
         Gtk.Window.__init__(self, title="jTunes")
         self.connect("destroy", self.on_destroy)
-        self.set_default_size(800, 600)
+        self.connect("size-allocate", self.on_window_resize)
+
         self.keep_running = False
         self.is_playing = False
         self.current_song_pos_ms = 0
@@ -298,6 +299,12 @@ class MainWindow(Gtk.Window):
         column_album.set_fixed_width(initial_column_width)
         column_genre.set_fixed_width(initial_column_width)
 
+        column_song_name.connect("notify::width", self.on_column_width_changed, "song_name_width")
+        column_time.connect("notify::width", self.on_column_width_changed, "time_width")
+        column_artist.connect("notify::width", self.on_column_width_changed, "artist_width")
+        column_album.connect("notify::width", self.on_column_width_changed, "album_width")
+        column_genre.connect("notify::width", self.on_column_width_changed, "genre_width")
+
 
         column_song_name.set_sort_column_id(1)
         column_time.set_sort_column_id(2)
@@ -310,6 +317,11 @@ class MainWindow(Gtk.Window):
         column_artist.set_resizable(True)
         column_time.set_resizable(True)
         column_song_name.set_resizable(True)
+        self.column_song_name = column_song_name
+        self.column_time = column_time
+        self.column_album = column_album
+        self.column_artist = column_artist
+        self.column_genre = column_genre
 
         self.treeview.append_column(column_song_name)
         self.treeview.append_column(column_time)
@@ -335,12 +347,21 @@ class MainWindow(Gtk.Window):
         self.init_database()
         self.add_column_if_not_exists('preferences', 'volume', 'REAL DEFAULT 0.5')
         self.add_column_if_not_exists('preferences', 'min_to_tray', 'INTEGER DEFAULT 0')
+        self.add_column_if_not_exists('preferences', 'window_width', 'INTEGER DEFAULT 800')
+        self.add_column_if_not_exists('preferences', 'window_height', 'INTEGER DEFAULT 600')
+        self.add_column_if_not_exists('preferences', 'genre_width', 'INTEGER DEFAULT 0')
+        self.add_column_if_not_exists('preferences', 'album_width', 'INTEGER DEFAULT 0')
+        self.add_column_if_not_exists('preferences', 'artist_width', 'INTEGER DEFAULT 0')
+        self.add_column_if_not_exists('preferences', 'time_width', 'INTEGER DEFAULT 0')
+        self.add_column_if_not_exists('preferences', 'song_name_width', 'INTEGER DEFAULT 0')
         self.add_column_if_not_exists('mp3_files', 'play_count', 'INTEGER DEFAULT 0')
         self.add_column_if_not_exists('mp3_files', 'tracknumber', 'TEXT')
         self.add_column_if_not_exists('mp3_files', 'discnumber', 'TEXT')
         self.add_column_if_not_exists('mp3_files', 'organization', 'TEXT')
         self.add_column_if_not_exists('mp3_files', 'date', 'TEXT')
+        self.set_default_size(self.load_window_width(), self.load_window_height())
         self.connect("delete-event", self.on_main_window_delete_event)
+        self.load_and_apply_column_widths()
         pygame.mixer.music.set_volume(self.load_volume_setting())
         volume_slider.set_value(self.load_volume_setting())
         # Attempt to load the previously selected music directory
@@ -351,6 +372,38 @@ class MainWindow(Gtk.Window):
             threading.Thread(target=self.scan_music_directory, args=(music_directory,)).start()
         # Populate the main TreeView with sample data
         self.create_tray_icon()
+    def load_and_apply_column_widths(self):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT song_name_width, time_width, artist_width, album_width, genre_width FROM preferences")
+        row = cursor.fetchone()
+
+        if row:
+            # Assuming the order matches the SELECT statement
+            self.column_song_name.set_fixed_width(row[0])
+            self.column_time.set_fixed_width(row[1])
+            self.column_artist.set_fixed_width(row[2])
+            self.column_album.set_fixed_width(row[3])
+            self.column_genre.set_fixed_width(row[4])
+
+        conn.close()
+
+    def save_column_width(self, pref_id, width):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        sql_update_query = f"UPDATE preferences SET {pref_id} = ? WHERE id = 1"
+        cursor.execute(sql_update_query, (width,))
+
+        conn.commit()
+        conn.close()
+ 
+    def on_column_width_changed(self, column, param_spec, pref_id):
+        width = column.get_width()
+        # Save the width to the database
+        self.save_column_width(pref_id, width)
+
     def set_treeview_selection_to_id(self, file_id):
         # This assumes 'file_id' is the first column in your treeview model
         model = self.treeview.get_model()
@@ -563,8 +616,43 @@ class MainWindow(Gtk.Window):
             pygame.mixer.music.unpause()
             self.is_playing = True
             self.update_play_pause_button()
+    def save_window_size(self, width, height):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+    
+        # Assuming `id` is 1 for the preferences row
+        cursor.execute("""
+            UPDATE preferences 
+            SET window_width = ?, window_height = ? 
+        """, (width, height))
+    
+        conn.commit()
+        conn.close()
 
-            
+
+    def on_window_resize(self, widget, allocation):
+        width = allocation.width
+        height = allocation.height
+        self.save_window_size(width, height)
+    def load_window_width(self):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT window_width FROM preferences LIMIT 1")
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+           return row[0]
+        return 800
+    def load_window_height(self):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT window_height FROM preferences LIMIT 1")
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+           return row[0]
+        return 600
+
     def save_volume_setting(self, volume):
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
