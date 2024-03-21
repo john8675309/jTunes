@@ -8,7 +8,7 @@ from appdirs import user_config_dir
 import mutagen
 from mutagen.easyid3 import EasyID3
 from mutagen.mp3 import MP3
-from mutagen.id3 import ID3, APIC
+from mutagen.id3 import ID3, APIC, TIT2, TPE1, TALB, TRCK, TPOS, TCON, TDRC, TXXX, ID3NoHeaderError
 import threading
 import base64
 from io import BytesIO
@@ -18,16 +18,61 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from threading import Timer
 
-def get_icon_base64():
-    # Return the Base64 encoded string of your icon
-    file_path = "icon_base64.txt"
-    # Read the Base64 encoded string from the file
-    #return """
-    #YOUR_BASE64_ENCODED_STRING_HERE
-    #"""
-    with open(file_path, "r") as file:
-        icon_base64 = file.read()
-    return icon_base64
+class EditTrackDialog(Gtk.Dialog):
+    def __init__(self, parent, title="", artist="", album="", track_number="",track_date="",track_disc_number="", track_organization="",track_genre=""):
+        super().__init__(title="Edit Track", transient_for=parent, flags=0)
+
+        # Add buttons
+        self.add_buttons(
+            Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+            Gtk.STOCK_OK, Gtk.ResponseType.OK
+        )
+
+        self.set_default_size(150, 100)
+
+        # Create a box to hold the inputs
+        box = self.get_content_area()
+        box.set_spacing(6)
+
+        # Title entry
+        self.title_entry = Gtk.Entry(text=title)
+        box.add(Gtk.Label(label="Title:"))
+        box.add(self.title_entry)
+
+        # Artist entry
+        self.artist_entry = Gtk.Entry(text=artist)
+        box.add(Gtk.Label(label="Artist:"))
+        box.add(self.artist_entry)
+
+        # Album entry
+        self.album_entry = Gtk.Entry(text=album)
+        box.add(Gtk.Label(label="Album:"))
+        box.add(self.album_entry)
+
+        self.track_genre_entry = Gtk.Entry(text=track_genre)
+        box.add(Gtk.Label(label="Genre:"))
+        box.add(self.track_genre_entry)
+
+        self.track_disc_number_entry = Gtk.Entry(text=track_disc_number)
+        box.add(Gtk.Label(label="Track Disc Number:"))
+        box.add(self.track_disc_number_entry)
+
+        self.track_number_entry = Gtk.Entry(text=track_number)
+        box.add(Gtk.Label(label="Track Number:"))
+        box.add(self.track_number_entry)
+
+        self.track_date_entry = Gtk.Entry(text=track_date)
+        box.add(Gtk.Label(label="Track Date:"))
+        box.add(self.track_date_entry)
+
+        self.track_organization_entry = Gtk.Entry(text=track_organization)
+        box.add(Gtk.Label(label="Orginization:"))
+        box.add(self.track_organization_entry)
+
+
+        self.show_all()
+
+
 
 class MainWindow(Gtk.Window):
     def __init__(self):
@@ -40,12 +85,13 @@ class MainWindow(Gtk.Window):
         self.current_song_pos_ms = 0
         self.treeview = Gtk.TreeView()
         self.current_filter_text = ""
+        self.editid =0
         window_width = 800  # Your window's initial width
         num_columns = 5  # The number of columns
         padding = 20  # Adjust as needed
         initial_column_width = (window_width - (padding * num_columns)) / num_columns
         self.liststore = Gtk.ListStore(int, str, str, str, str, str)
-        icon_base64 = get_icon_base64()
+        icon_base64 = self.get_icon_base64()
         icon_bytes = base64.b64decode(icon_base64)
         # Load the bytes into a GdkPixbuf.Pixbuf
         loader = GdkPixbuf.PixbufLoader()
@@ -237,7 +283,7 @@ class MainWindow(Gtk.Window):
         # Create the main TreeView
         self.treeview = Gtk.TreeView()
         self.treeview.connect("row-activated", self.on_row_activated)
-
+        self.treeview.connect("button-press-event", self.on_treeview_right_click)
         # Create columns for the main TreeView
         renderer_text = Gtk.CellRendererText()
         column_song_name = Gtk.TreeViewColumn("Song Name", renderer_text, text=1)
@@ -290,6 +336,10 @@ class MainWindow(Gtk.Window):
         self.add_column_if_not_exists('preferences', 'volume', 'REAL DEFAULT 0.5')
         self.add_column_if_not_exists('preferences', 'min_to_tray', 'INTEGER DEFAULT 0')
         self.add_column_if_not_exists('mp3_files', 'play_count', 'INTEGER DEFAULT 0')
+        self.add_column_if_not_exists('mp3_files', 'tracknumber', 'TEXT')
+        self.add_column_if_not_exists('mp3_files', 'discnumber', 'TEXT')
+        self.add_column_if_not_exists('mp3_files', 'organization', 'TEXT')
+        self.add_column_if_not_exists('mp3_files', 'date', 'TEXT')
         self.connect("delete-event", self.on_main_window_delete_event)
         pygame.mixer.music.set_volume(self.load_volume_setting())
         volume_slider.set_value(self.load_volume_setting())
@@ -301,6 +351,162 @@ class MainWindow(Gtk.Window):
             threading.Thread(target=self.scan_music_directory, args=(music_directory,)).start()
         # Populate the main TreeView with sample data
         self.create_tray_icon()
+    def set_treeview_selection_to_id(self, file_id):
+        # This assumes 'file_id' is the first column in your treeview model
+        model = self.treeview.get_model()
+        iter = model.get_iter_first()
+        while iter is not None:
+            if model[iter][0] == file_id:
+                # We found the row, so select it and scroll to it
+                path = model.get_path(iter)
+                selection = self.treeview.get_selection()
+                selection.select_path(path)
+                self.treeview.scroll_to_cell(path, None, False, 0, 0)
+                break
+            iter = model.iter_next(iter)
+    def update_file_and_db(self, file_path, updates):
+        self.update_id3_tags(file_path, updates)
+        self.update_database_entry(file_path, updates)
+    def update_database_entry(self, file_path, updates):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+    
+        # Extracting values for database update, using empty strings for missing values
+        title = updates.get('title', '')
+        artist = updates.get('artist', '')
+        album = updates.get('album', '')
+        tracknumber = updates.get('tracknumber', '')
+        discnumber = updates.get('discnumber', '')
+        genre = updates.get('genre', '')
+        date = updates.get('date', '')
+        date = updates.get('date', '')
+        organization = updates.get('organization','')
+
+        # You might want to calculate the length again if it has changed
+        audio_file = MP3(file_path)
+        length = int(audio_file.info.length)
+
+        # Preparing the SQL statement
+        sql_update_query = """
+        UPDATE mp3_files SET
+        song_name = ?,
+        length = ?,
+        artist = ?,
+        album = ?,
+        tracknumber = ?,
+        discnumber = ?,
+        genre = ?,
+        date = ?,
+        organization = ?
+        WHERE filename = ?"""
+    
+        # Executing the SQL statement
+        cursor.execute(sql_update_query, (title, length, artist, album, tracknumber, discnumber, genre, date, organization,file_path))
+        conn.commit()
+        conn.close()
+        self.populate_treeview()
+        self.set_treeview_selection_to_id(self.editid)
+    def update_id3_tags(self,file_path, updates):
+        try:
+            audio = ID3(file_path)
+        except ID3NoHeaderError:
+            audio = ID3()
+
+        if 'title' in updates:
+            audio['TIT2'] = TIT2(encoding=3, text=updates['title'])
+        if 'artist' in updates:
+            audio['TPE1'] = TPE1(encoding=3, text=updates['artist'])
+        if 'album' in updates:
+            audio['TALB'] = TALB(encoding=3, text=updates['album'])
+        if 'tracknumber' in updates:
+            audio['TRCK'] = TRCK(encoding=3, text=updates['tracknumber'])
+        if 'discnumber' in updates:
+            audio['TPOS'] = TPOS(encoding=3, text=updates['discnumber'])
+        if 'genre' in updates:
+            audio['TCON'] = TCON(encoding=3, text=updates['genre'])
+        if 'date' in updates:
+            audio['TDRC'] = TDRC(encoding=3, text=updates['date'])
+
+        if 'organization' in updates:
+            audio['TXXX:organization'] = TXXX(encoding=3, desc='organization', text=updates['organization'])
+
+        audio.save()
+    def get_file_path_by_id(self, file_id):
+        self.editid = file_id
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT filename FROM mp3_files WHERE id = ?", (file_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            return row[0]
+        return None
+
+    def on_edit_track_activate(self, widget):
+    
+        selection = self.treeview.get_selection()
+        model, treeiter = selection.get_selected()
+        if treeiter is None:
+            print("No track selected.")
+            return
+        file_id = model[treeiter][0]
+        file_path = self.get_file_path_by_id(file_id)
+        if not file_path:
+            print("File path not found.")
+            return
+
+        # Assuming you can extract ID3 tags from the file_path
+        audio = EasyID3(file_path)
+        for tag in audio:
+            print(f"{tag}: {audio[tag]}")
+        title = audio.get('title', [""])[0]
+        artist = audio.get('artist', [""])[0]
+        album = audio.get('album', [""])[0]
+        track_number = audio.get('tracknumber', [""])[0]
+        date = audio.get('date', [""])[0]
+        discnumber = audio.get('discnumber', [""])[0]
+        organization = audio.get('organization', [""])[0]
+        genre = audio.get('genre', [""])[0]
+        dialog = EditTrackDialog(self, title=title, artist=artist, album=album, track_number=track_number,track_date=date,track_disc_number=discnumber,track_organization=organization,track_genre=genre)
+
+        response = dialog.run()
+        if response == Gtk.ResponseType.OK:
+            #print("The OK button was clicked")
+            # Here you can handle the retrieval and saving of ID3 tags
+            #print("Title: ", dialog.title_entry.get_text())
+            #print("Artist: ", dialog.artist_entry.get_text())
+            #print("Album: ", dialog.album_entry.get_text())
+            #print("Track Number: ", dialog.track_number_entry.get_text())
+            #print("Track Date: ", dialog.track_date_entry.get_text())
+            #print("Track Disc Number: ", dialog.track_disc_number_entry.get_text())
+            #print("Track Orginization: ", dialog.track_organization_entry.get_text())
+            #print("Track Genre: ", dialog.track_genre_entry.get_text())
+            updates = {
+                'album': dialog.album_entry.get_text(),
+                'title': dialog.title_entry.get_text(),
+                'artist': dialog.artist_entry.get_text(),
+                'discnumber': dialog.track_disc_number_entry.get_text(),
+                'organization':dialog.track_organization_entry.get_text(),
+                'tracknumber':dialog.track_disc_number_entry.get_text(),
+                'genre':dialog.track_genre_entry.get_text(),
+                'date':dialog.track_date_entry.get_text(),
+            }
+            #self.update_id3_tags(file_path, updates)
+            self.update_file_and_db(file_path, updates)
+        elif response == Gtk.ResponseType.CANCEL:
+            print("The Cancel button was clicked")
+        
+        dialog.destroy()
+    def on_treeview_right_click(self, widget, event):
+        if event.button == 3:  # Right click
+            menu = Gtk.Menu()
+
+            edit_track_item = Gtk.MenuItem(label="Edit Track")
+            edit_track_item.connect("activate", self.on_edit_track_activate)
+            menu.append(edit_track_item)
+
+            menu.show_all()
+            menu.popup_at_pointer(None)
     def on_search_entry_changed(self, entry):
         """Called whenever the text in the search entry changes."""
         self.current_filter_text = entry.get_text()  # Update the current filter text
@@ -467,8 +673,7 @@ class MainWindow(Gtk.Window):
         min_to_tray = self.load_min_to_tray_setting()
         if min_to_tray == 1:
             self.hide()
-            #self.hide_on_delete()  # This prevents the window from being destroyed
-            return True  # This stops the event from propagating further
+            return True
         return False
     def on_tray_icon_activate(self, icon):
         if self.is_visible():
@@ -532,10 +737,7 @@ class MainWindow(Gtk.Window):
         about_dialog.run()
         about_dialog.destroy()
 
-    def populate_treeview(self):
-        #liststore = Gtk.ListStore(int,str, str, str, str, str)
-        # Assuming self.treeview is your Gtk.TreeView and it's associated with a ListStore or similar
-        
+    def populate_treeview(self):        
         self.liststore.clear()
 
         conn = sqlite3.connect(self.db_path)
@@ -815,6 +1017,16 @@ class MainWindow(Gtk.Window):
         pygame.mixer.music.stop()
         self.keep_running = False
         Gtk.main_quit()
+    def get_icon_base64(self):
+        # Return the Base64 encoded string of your icon
+        file_path = "icon_base64.txt"
+        # Read the Base64 encoded string from the file
+        #return """
+        #YOUR_BASE64_ENCODED_STRING_HERE
+        #"""
+        with open(file_path, "r") as file:
+            icon_base64 = file.read()
+        return icon_base64
 window = MainWindow()
 #window.connect("destroy", self.on_destroy)
 window.show_all()
